@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>matsuo-miyu-blog</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <div class="app">
+    <aside class="side">
+      <div class="side-top">
+        <div class="avatar"></div>
+        <div class="name">松尾 美佑</div>
+        <div class="sub">Blog Archive Viewer</div>
+      </div>
+
+      <div class="search">
+        <input id="q" placeholder="検索（タイトル / ID）" />
+      </div>
+
+      <div id="list" class="list"></div>
+    </aside>
+
+    <main class="main">
+      <div class="header">
+        <div class="datebox">
+          <div id="ym" class="ym">----</div>
+          <div class="dayrow">
+            <div id="dd" class="dd">--</div>
+            <div class="dowcol">
+              <div id="dow" class="dow">---</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="titlebox">
+          <div class="meta">
+            <span id="author">松尾 美佑</span>
+            <span id="dt" class="dt">----</span>
+          </div>
+          <div id="title" class="title">記事を選択してください</div>
+        </div>
+
+        <div class="actions">
+          <button id="openSrc" class="icon" title="元URLを開く">↗</button>
+          <button class="icon" title="x">𝕏</button>
+        </div>
+      </div>
+
+      <div id="content" class="content"></div>
+    </main>
+  </div>
+
+  <script src="./app.js"></script>
+</body>
+</html>
