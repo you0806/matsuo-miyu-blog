@@ -4,10 +4,10 @@
 // - 記事md:     ./posts/.../index.md
 // - 本文:       ./posts/.../page.html（index.md内に「本文: page.html」など）
 //
-// 重要な安定化（今回）:
-// 1) viewer を何度も全面 innerHTML 上書きしない（骨格は1回だけ作る）
-// 2) 読み込みトークンで “最新以外の結果” を破棄（レース対策）
-// 3) fallback 直表示時に page.html の相対URLを絶対URLへ書き換え
+// 安定化:
+// 1) viewer の骨格は1回だけ作り、必要部分だけ更新
+// 2) 読み込みトークンで“最新以外の結果”を破棄（レース対策）
+// 3) fallback直表示時に page.html の相対URLを絶対URLへ変換
 
 // =============================
 // DOM取得（IDが変わっても拾えるように）
@@ -77,7 +77,7 @@ if (!listEl || !viewerEl) {
 // =============================
 // URL基準（<base href="./"> 前提）
 // =============================
-const SITE_ROOT = new URL(document.baseURI);               // 例: https://you0806.github.io/matsuo-miyu-blog/
+const SITE_ROOT = new URL(document.baseURI);
 const POSTS_INDEX_URL = new URL("./index/posts.json", SITE_ROOT);
 
 // =============================
@@ -86,7 +86,7 @@ const POSTS_INDEX_URL = new URL("./index/posts.json", SITE_ROOT);
 function normalizePath(p) {
   if (!p) return "";
   let s = String(p).trim();
-  s = s.replaceAll("\\", "/");  // Windowsパス対策
+  s = s.replaceAll("\\", "/");     // Windowsパス対策
   s = s.replace(/^\.\/+/, "");
   s = s.replace(/^\/+/, "");
   return s;
@@ -101,17 +101,7 @@ function getPostPathFromHash() {
 
 function setPostPathToHash(path) {
   const params = new URLSearchParams(location.hash.replace(/^#/, ""));
-  params.set("p", normalizePath(path(path));
-  location.hash = params.toString();
-}
-
-// 上の setPostPathToHash の typo 防止
-function normalizePathSafe(p) {
-  return normalizePath(p);
-}
-function setPostPathToHash(path) {
-  const params = new URLSearchParams(location.hash.replace(/^#/, ""));
-  params.set("p", normalizePathSafe(path));
+  params.set("p", normalizePath(path));
   location.hash = params.toString();
 }
 
@@ -160,9 +150,7 @@ function renderMarkdownRough(mdText, mdFileUrl) {
       // リンク [text](url)
       line = line.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, text, href) => {
         const linkUrl = new URL(href, mdDir);
-        return `<a href="${linkUrl.href}" target="_blank" rel="noreferrer">${escapeHtml(
-          text
-        )}</a>`;
+        return `<a href="${linkUrl.href}" target="_blank" rel="noreferrer">${escapeHtml(text)}</a>`;
       });
 
       if (line.trim() === "") return "<br>";
@@ -174,16 +162,15 @@ function renderMarkdownRough(mdText, mdFileUrl) {
 // =============================
 // page.html fallback 用: 相対URLを絶対URLへ
 // =============================
-function rebaseHtml(htmlText, baseUrl) {
+function rebaseHtml(htmlText, baseUrlObj) {
   try {
     const parser = new DOMParser();
     const doc = parser.parseFromString(String(htmlText ?? ""), "text/html");
 
-    // script は念のため除去
+    // 念のためscriptは除去（表示専用）
     doc.querySelectorAll("script").forEach((s) => s.remove());
 
-    // href/src を絶対化
-    const attrs = [
+    const targets = [
       ["a", "href"],
       ["img", "src"],
       ["link", "href"],
@@ -193,14 +180,13 @@ function rebaseHtml(htmlText, baseUrl) {
       ["iframe", "src"],
     ];
 
-    for (const [sel, attr] of attrs) {
-      doc.querySelectorAll(`${sel}[${attr}]`).forEach((el) => {
+    for (const [tag, attr] of targets) {
+      doc.querySelectorAll(`${tag}[${attr}]`).forEach((el) => {
         const v = el.getAttribute(attr);
         if (!v) return;
-        // data:, mailto:, javascript: は触らない
         if (/^(data:|mailto:|javascript:|#)/i.test(v)) return;
         try {
-          el.setAttribute(attr, new URL(v, baseUrl).href);
+          el.setAttribute(attr, new URL(v, baseUrlObj).href);
         } catch {}
       });
     }
@@ -236,14 +222,7 @@ function toViewModel(raw) {
     path = normalizePath(`${dir}/index.md`);
   }
 
-  return {
-    id: raw.id ?? "",
-    title,
-    date,
-    orig,
-    path,
-    raw,
-  };
+  return { id: raw.id ?? "", title, date, orig, path, raw };
 }
 
 function renderPostList(posts) {
@@ -253,9 +232,7 @@ function renderPostList(posts) {
   info.className = "hint";
   info.innerHTML = `
     <div>posts: ${posts.length}</div>
-    <div>index: <a href="${POSTS_INDEX_URL.href}" target="_blank" rel="noreferrer">${escapeHtml(
-      POSTS_INDEX_URL.href
-    )}</a></div>
+    <div>index: <a href="${POSTS_INDEX_URL.href}" target="_blank" rel="noreferrer">${escapeHtml(POSTS_INDEX_URL.href)}</a></div>
     <hr>
   `;
   listEl.appendChild(info);
@@ -269,9 +246,7 @@ function renderPostList(posts) {
       <div class="meta">${escapeHtml(p.path)}</div>
       ${
         p.orig
-          ? `<div class="meta">orig: <a href="${escapeHtml(
-              p.orig
-            )}" target="_blank" rel="noreferrer">${escapeHtml(p.orig)}</a></div>`
+          ? `<div class="meta">orig: <a href="${escapeHtml(p.orig)}" target="_blank" rel="noreferrer">${escapeHtml(p.orig)}</a></div>`
           : ""
       }
     `;
@@ -286,7 +261,7 @@ function renderPostList(posts) {
 }
 
 // =============================
-// viewer レンダー骨格（1回で作る）
+// viewer（骨格1回）
 // =============================
 function renderViewerShell({ sourceUrl, sourceLabel, bodyUrl, bodyLabel }) {
   viewerEl.innerHTML = `
@@ -294,7 +269,7 @@ function renderViewerShell({ sourceUrl, sourceLabel, bodyUrl, bodyLabel }) {
     <div class="meta" id="metaBody"></div>
     <div class="meta" id="metaStatus"></div>
     <hr>
-    <div id="viewerMain" class="viewerMain"></div>
+    <div id="viewerMain"></div>
     <div id="viewerExtra" class="hint" style="margin-top:8px;"></div>
   `;
 
@@ -325,37 +300,35 @@ function setExtraHtml(html) {
   if (el) el.innerHTML = html;
 }
 
-// =============================
-// 本文表示（iframe + fetch fallback）
-// =============================
-function mountIframe(bodyUrl) {
+function mountIframe(url) {
   setMainHtml(`
     <iframe
       id="bodyFrame"
-      src="${bodyUrl}"
+      src="${url}"
       style="width:100%; height:78vh; border:1px solid #eee; border-radius:12px; background:#fff;"
       loading="lazy"
     ></iframe>
   `);
 }
 
+// =============================
+// 記事オープン（レース対策トークン）
+// =============================
+let openToken = 0;
+
 async function runFallback(token, bodyUrlObj) {
-  // tokenが古ければ何もしない
   if (token !== openToken) return;
 
   try {
     const res = await fetch(bodyUrlObj.href, { cache: "no-store" });
     if (!res.ok) {
-      setExtraHtml(`<pre>${escapeHtml(
-        `fallback fetch failed: ${res.status} ${res.statusText}\n${bodyUrlObj.href}`
-      )}</pre>`);
+      setExtraHtml(`<pre>${escapeHtml(`fallback fetch failed: ${res.status} ${res.statusText}\n${bodyUrlObj.href}`)}</pre>`);
       return;
     }
     const htmlText = await res.text();
     if (token !== openToken) return;
 
     const rebased = rebaseHtml(htmlText, bodyUrlObj);
-
     setExtraHtml(`
       <details>
         <summary>フォールバックで本文を直表示（クリックで開く）</summary>
@@ -370,25 +343,14 @@ async function runFallback(token, bodyUrlObj) {
   }
 }
 
-// =============================
-// 記事オープン（レース対策トークン）
-// =============================
-let openToken = 0;
-
 async function openPostByPath(postPath) {
   const rel = normalizePath(postPath);
   if (!rel) return;
 
-  const token = ++openToken; // これが “今回の読み込み” の番号
-
+  const token = ++openToken;
   const mdUrl = new URL(rel, SITE_ROOT);
 
-  renderViewerShell({
-    sourceUrl: mdUrl.href,
-    sourceLabel: rel,
-    bodyUrl: "",
-    bodyLabel: "",
-  });
+  renderViewerShell({ sourceUrl: mdUrl.href, sourceLabel: rel, bodyUrl: "", bodyLabel: "" });
   setStatus("loading markdown...");
   setMainHtml(`<p class="hint">読み込み中...<br><code>${escapeHtml(mdUrl.href)}</code></p>`);
   setExtraHtml("");
@@ -417,7 +379,6 @@ async function openPostByPath(postPath) {
   if (bodyRef) {
     const bodyUrlObj = new URL(normalizePath(bodyRef), mdDir);
 
-    // シェルを “一回だけ” 作り直して、メタだけ固定
     renderViewerShell({
       sourceUrl: mdUrl.href,
       sourceLabel: rel,
@@ -427,12 +388,11 @@ async function openPostByPath(postPath) {
 
     setStatus("iframe loading...");
     mountIframe(bodyUrlObj.href);
-    setExtraHtml(`<span class="hint">もし本文が真っ白なら、数秒後にフォールバックが出ます。</span>`);
+    setExtraHtml(`<span class="hint">もし本文が真っ白なら、少し後にフォールバックが出ます。</span>`);
 
     const iframe = viewerEl.querySelector("#bodyFrame");
     if (iframe) {
       iframe.addEventListener("load", () => {
-        // 最新の読み込みだけ反映
         if (token !== openToken) return;
         setStatus("iframe loaded");
       });
@@ -442,18 +402,12 @@ async function openPostByPath(postPath) {
       });
     }
 
-    // 少し待ってから fallback（Safari等でiframeが微妙でも本文出す）
-    setTimeout(() => {
-      runFallback(token, bodyUrlObj);
-    }, 800);
-
+    setTimeout(() => runFallback(token, bodyUrlObj), 800);
     return;
   }
 
-  // 本文指定が無ければMarkdownを雑表示
   setStatus("render markdown");
-  const bodyHtml = renderMarkdownRough(mdText, mdUrl);
-  setMainHtml(bodyHtml);
+  setMainHtml(renderMarkdownRough(mdText, mdUrl));
   setExtraHtml("");
 }
 
@@ -479,7 +433,7 @@ async function main() {
       setPostPathToHash(first.path);
       openPostByPath(first.path);
     } else {
-      renderViewerShell({ sourceUrl: "", bodyUrl: "" });
+      renderViewerShell({ sourceUrl: "", sourceLabel: "", bodyUrl: "", bodyLabel: "" });
       setStatus("no posts");
       setMainHtml(`<p class="hint">記事が見つかりません（posts.json の中身確認してね）</p>`);
     }
