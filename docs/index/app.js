@@ -7,10 +7,6 @@
 // ポイント：
 // 1) 先頭スラッシュの絶対パス "/posts/..." は使わない
 // 2) new URL("相対パス", "基準URL") で必ずURLを作る
-//
-// 今回の posts.json は例として以下の形を想定（あなたの貼った形）
-// { id, title, datetime, url, local_dir, images, ... }
-// ※ path が無いので local_dir から index.md を組み立てる
 
 const listEl = document.getElementById("list");
 const viewerEl = document.getElementById("viewer");
@@ -39,46 +35,6 @@ function escapeHtml(s) {
 }
 
 /**
- * Windows の \ 区切りを / に直しつつ、先頭の / を消して相対パス化
- */
-function normalizeRelPath(p) {
-  let s = String(p ?? "");
-  s = s.replaceAll("\\", "/");
-  s = s.replace(/^\/+/, "");     // 先頭 / は絶対扱いになるので除去
-  s = s.replace(/^\.\//, "");    // ./ を消す
-  return s;
-}
-
-/**
- * posts.json の1件を、このビューア用の共通形式にする
- * - title
- * - date/datetime
- * - path (必須): "posts/.../index.md" の形に揃える
- */
-function normalizePostItem(p) {
-  const title = p?.title ?? "(no title)";
-  const datetime = p?.datetime ?? p?.date ?? "";
-  const id = p?.id ?? "";
-  const originalUrl = p?.url ?? "";
-
-  // 優先順位：
-  // 1) p.path があるならそれを使う（将来対応）
-  // 2) p.local_dir があるなら local_dir/index.md を組み立てる
-  // 3) それも無いなら null
-  let path = null;
-
-  if (p?.path) {
-    path = normalizeRelPath(p.path);
-  } else if (p?.local_dir) {
-    // 例: "posts\\2025\\2025-04-23_1409_103378"
-    const dir = normalizeRelPath(p.local_dir);
-    path = `${dir}/index.md`;
-  }
-
-  return { title, datetime, id, originalUrl, path };
-}
-
-/**
  * hash から p を取り出す
  * 例: #p=posts/2025/.../index.md
  */
@@ -94,17 +50,64 @@ function getPostPathFromHash() {
 function setPostPathToHash(path) {
   const params = new URLSearchParams(location.hash.replace(/^#/, ""));
   params.set("p", path);
-  location.hash = params.toString();
+  location.hash = params.toString(); // 例: #p=posts/...
+}
+
+/**
+ * パスの区切りを / に統一（Windowsの \ 対策）
+ */
+function normalizeSlashes(path) {
+  return String(path ?? "").replaceAll("\\", "/");
+}
+
+/**
+ * posts.json(あなたの形式) → viewer用の形式へ正規化
+ * 入力例:
+ *  {
+ *    "id": "103378",
+ *    "title": "...",
+ *    "datetime": "2025.04.23 14:09",
+ *    "url": "https://...",
+ *    "local_dir": "posts\\2025\\2025-04-23_1409_103378",
+ *    ...
+ *  }
+ *
+ * 出力:
+ *  { title, date, path, id, url }
+ *  path は "posts/....../index.md" の形に揃える
+ */
+function normalizePosts(rawPosts) {
+  if (!Array.isArray(rawPosts)) return [];
+
+  return rawPosts
+    .map((p) => {
+      const title = p.title ?? "(no title)";
+      const date = p.datetime ?? p.date ?? "";
+      const id = p.id ?? "";
+      const url = p.url ?? p.source_url ?? "";
+
+      // 既に path があるならそれ優先。なければ local_dir から作る
+      let path = p.path ?? "";
+      if (!path && p.local_dir) {
+        // local_dir はディレクトリ想定なので /index.md を付ける
+        path = `${p.local_dir}/index.md`;
+      }
+
+      path = normalizeSlashes(path);
+
+      // もし "docs/posts/..." みたいに docs が混ざってたら消しておく（保険）
+      path = path.replace(/^docs\//, "");
+
+      return { title, date, path, id, url };
+    })
+    .filter((p) => p.path); // path 無いものは除外
 }
 
 /**
  * Markdownを“最低限”HTMLっぽく表示（凝った変換はしない）
  * - 見出し(#) / 画像(![]) / リンク([]()) だけ軽く対応
- * - 本格的にやりたいなら marked.js 等を入れるのが定番
  */
 function renderMarkdownRough(mdText, mdFileUrl) {
-  // mdFileUrl = 記事のindex.mdのURL
-  // 画像などの相対パスの基準（記事のフォルダ）を作る
   const mdDir = new URL("./", mdFileUrl);
 
   const lines = String(mdText ?? "").split("\n");
@@ -117,28 +120,17 @@ function renderMarkdownRough(mdText, mdFileUrl) {
 
       // 画像 ![alt](path)
       line = line.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_, alt, src) => {
-        try {
-          const imgUrl = new URL(src, mdDir);
-          return `<img alt="${escapeHtml(alt)}" src="${imgUrl.href}">`;
-        } catch {
-          return `<span class="hint">[image parse error: ${escapeHtml(src)}]</span>`;
-        }
+        const imgUrl = new URL(src, mdDir);
+        return `<img alt="${escapeHtml(alt)}" src="${imgUrl.href}">`;
       });
 
       // リンク [text](url)
       line = line.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, text, href) => {
-        try {
-          const linkUrl = new URL(href, mdDir);
-          return `<a href="${linkUrl.href}" target="_blank" rel="noreferrer">${escapeHtml(text)}</a>`;
-        } catch {
-          return `<span class="hint">[link parse error: ${escapeHtml(href)}]</span>`;
-        }
+        const linkUrl = new URL(href, mdDir);
+        return `<a href="${linkUrl.href}" target="_blank" rel="noreferrer">${escapeHtml(text)}</a>`;
       });
 
-      // 空行は段落区切りっぽく
       if (line.trim() === "") return "<br>";
-
-      // 通常行
       return `<p>${escapeHtml(line)}</p>`;
     })
     .join("");
@@ -157,62 +149,42 @@ async function loadPostsIndex() {
       `posts.json の読み込み失敗: ${res.status} ${res.statusText}\nURL: ${POSTS_INDEX_URL.href}`
     );
   }
-  const json = await res.json();
-  if (!Array.isArray(json)) {
-    throw new Error("posts.json は配列(JSON Array)である必要があります。");
-  }
-  return json;
+  return await res.json();
 }
 
-function renderPostList(rawPosts) {
+function renderPostList(posts) {
   listEl.innerHTML = "";
 
-  const posts = rawPosts.map(normalizePostItem);
-
-  posts.forEach((p, idx) => {
+  posts.forEach((p) => {
     const div = document.createElement("div");
     div.className = "post";
 
-    const pathView = p.path ?? "(no local path)";
     div.innerHTML = `
-      <div><strong>${escapeHtml(p.title)}</strong></div>
-      <div class="meta">${escapeHtml(p.datetime)}${p.id ? ` / id:${escapeHtml(p.id)}` : ""}</div>
-      <div class="meta">${escapeHtml(pathView)}</div>
+      <div><strong>${escapeHtml(p.title ?? "(no title)")}</strong></div>
+      <div class="meta">${escapeHtml(p.date ?? "")} ${p.id ? ` / id:${escapeHtml(p.id)}` : ""}</div>
+      <div class="meta">${escapeHtml(p.path ?? "")}</div>
       ${
-        p.originalUrl
-          ? `<div class="meta">orig: <a href="${escapeHtml(p.originalUrl)}" target="_blank" rel="noreferrer">${escapeHtml(p.originalUrl)}</a></div>`
+        p.url
+          ? `<div class="meta">orig: <a href="${escapeHtml(p.url)}" target="_blank" rel="noreferrer">${escapeHtml(p.url)}</a></div>`
           : ""
       }
     `;
 
     div.addEventListener("click", () => {
-      if (!p.path) {
-        viewerEl.innerHTML = `<p>この項目は表示できません（path が作れません）。</p>`;
-        return;
-      }
       setPostPathToHash(p.path);
       openPostByPath(p.path);
     });
 
-    // 先頭に軽く目印（任意）
-    if (idx === 0) {
-      div.style.borderTop = "1px solid #eee";
-    }
-
     listEl.appendChild(div);
   });
 
-  return posts;
+  return posts; // 呼び出し元で先頭を開くのに使える
 }
 
 async function openPostByPath(postPath) {
   if (!postPath) return;
 
-  // 絶対扱いを避けるため、先頭 / を除去して相対化
-  const safePath = normalizeRelPath(postPath);
-
-  // postPath をサイトルートからの相対としてURL化（これで /repo/ でも壊れない）
-  const mdUrl = new URL(safePath, SITE_ROOT);
+  const mdUrl = new URL(postPath, SITE_ROOT);
 
   viewerEl.innerHTML = `<p class="hint">読み込み中...<br><code>${escapeHtml(mdUrl.href)}</code></p>`;
 
@@ -221,7 +193,7 @@ async function openPostByPath(postPath) {
     viewerEl.innerHTML = `
       <p>記事の読み込みに失敗しました。</p>
       <pre>${escapeHtml(`${res.status} ${res.statusText}\n${mdUrl.href}`)}</pre>
-      <p class="hint">posts.json の local_dir（or path）と実ファイルの場所が一致しているか確認してね。</p>
+      <p class="hint">posts.json の path（または local_dir）と、Pagesに公開されている実ファイルの場所が一致しているか確認してね。</p>
     `;
     return;
   }
@@ -230,9 +202,7 @@ async function openPostByPath(postPath) {
   const bodyHtml = renderMarkdownRough(mdText, mdUrl);
 
   viewerEl.innerHTML = `
-    <div class="meta">
-      source: <a href="${mdUrl.href}" target="_blank" rel="noreferrer">${escapeHtml(safePath)}</a>
-    </div>
+    <div class="meta">source: <a href="${mdUrl.href}" target="_blank" rel="noreferrer">${escapeHtml(postPath)}</a></div>
     <hr>
     ${bodyHtml}
   `;
@@ -241,7 +211,8 @@ async function openPostByPath(postPath) {
 async function main() {
   try {
     const rawPosts = await loadPostsIndex();
-    const posts = renderPostList(rawPosts);
+    const posts = normalizePosts(rawPosts);
+    renderPostList(posts);
 
     // URLハッシュに #p=... が入ってたら、その記事を開く
     const fromHash = getPostPathFromHash();
