@@ -2,7 +2,7 @@
 // GitHub Pages で「パスが壊れない」ことを最優先にしたシンプルビューア。
 // - posts一覧: ./index/posts.json
 // - 記事md:     ./posts/.../index.md
-// - 記事本文:   ./posts/.../page.html（index.md に「本文: page.html」などで指定）
+// - 記事本文:   ./posts/.../page.html（index.md に「本文: page.html」等で指定）
 // - 画像:       page.html / md と同じフォルダ内 images/.. を想定
 //
 // ポイント：
@@ -68,17 +68,33 @@ function stripFrontMatter(mdText) {
 }
 
 /**
- * index.md の中から「本文: page.html」みたいな指定を拾う
- * - "本文: page.html"
- * - "body: page.html"
- * どっちでもOKにしておく
+ * index.md の中から「本文: page.html」みたいな指定を拾う（強化版）
+ * 対応する例:
+ *  - 本文: page.html
+ *  - 本文：page.html   （全角コロン）
+ *  -   本文 : page.html（先頭スペース）
+ *  - - 本文: page.html （箇条書き）
+ *  - body: page.html
  */
 function findBodyFileRef(mdText) {
   const t = String(mdText ?? "");
-  const m = t.match(/^(?:本文|body)\s*:\s*(.+)$/m);
-  if (!m) return null;
-  const ref = m[1].trim();
-  return ref ? ref : null;
+
+  // 行ごとに見る（正規表現1発より堅い）
+  const lines = t.split("\n");
+  for (const line of lines) {
+    const s = line.trim();
+
+    // 先頭の "- " や "・" を許容
+    const cleaned = s.replace(/^[-•・]\s*/, "");
+
+    // "本文" or "body" + ":" or "：" を許容
+    const m = cleaned.match(/^(本文|body)\s*[:：]\s*(.+)\s*$/i);
+    if (m) {
+      const ref = m[2]?.trim();
+      if (ref) return ref;
+    }
+  }
+  return null;
 }
 
 /**
@@ -164,6 +180,16 @@ function toViewModel(raw) {
 function renderPostList(posts) {
   listEl.innerHTML = "";
 
+  // ちょいデバッグ（消したければ消してOK）
+  const info = document.createElement("div");
+  info.className = "hint";
+  info.innerHTML = `
+    <div>posts: ${posts.length}</div>
+    <div>index: <a href="${POSTS_INDEX_URL.href}" target="_blank" rel="noreferrer">${POSTS_INDEX_URL.href}</a></div>
+    <hr>
+  `;
+  listEl.appendChild(info);
+
   posts.forEach((p) => {
     const div = document.createElement("div");
     div.className = "post";
@@ -220,10 +246,10 @@ async function openPostByPath(postPath) {
 
   // index.md に本文ファイル指定があるなら、それを優先して表示
   const bodyRef = findBodyFileRef(mdText);
+
   if (bodyRef) {
     const bodyUrl = new URL(normalizePath(bodyRef), mdDir);
 
-    // 安全＆楽：iframe で表示（CSSや画像相対もそのまま動く）
     viewerEl.innerHTML = `
       <div class="meta">source: <a href="${mdUrl.href}" target="_blank" rel="noreferrer">${escapeHtml(
         rel
@@ -241,7 +267,7 @@ async function openPostByPath(postPath) {
     return;
   }
 
-  // それ以外は「雑Markdown表示」
+  // 見つからなければ Markdown を雑表示
   const bodyHtml = renderMarkdownRough(mdText, mdUrl);
 
   viewerEl.innerHTML = `
@@ -261,17 +287,31 @@ async function main() {
   try {
     const rawPosts = await loadPostsIndex();
 
-    // rawPosts が配列じゃない形も一応救済
-    const arr = Array.isArray(rawPosts) ? rawPosts : (rawPosts.posts ?? []);
+    const arr = Array.isArray(rawPosts) ? rawPosts : rawPosts.posts ?? [];
     const posts = arr.map(toViewModel).filter((p) => p.path);
 
     renderPostList(posts);
 
-    // hash に #p=... が入ってたらそれを開く
     const fromHash = getPostPathFromHash();
     if (fromHash) {
       openPostByPath(fromHash);
       return;
     }
 
-    // ★ サンプル表示：hash が無い場合は先頭の記事を自動で開く
+    // hash が無い場合は先頭の記事を自動で開く（サンプル表示）
+    const first = posts[0];
+    if (first?.path) {
+      setPostPathToHash(first.path);
+      openPostByPath(first.path);
+    }
+  } catch (e) {
+    listEl.innerHTML = `<pre>${escapeHtml(String(e))}</pre>`;
+  }
+}
+
+window.addEventListener("hashchange", () => {
+  const p = getPostPathFromHash();
+  if (p) openPostByPath(p);
+});
+
+main();
