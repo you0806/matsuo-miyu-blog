@@ -5,46 +5,65 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Matsuo Miyu Blog Viewer</title>
 
-  <!--
-    GitHub Pages では URL が /<repo>/ になることが多い。
-    だから「/posts/...」みたいな絶対パスを使うと壊れる。
-    base を "./" にしておくと、このHTMLの場所（=サイトのルート）を基準に相対パスが解決される。
-  -->
+  <!-- GitHub Pages 対策：ルート基準を repo の公開URLに合わせる -->
   <base href="./" />
 
-  <style>
-    body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0; }
-    header { padding: 16px; border-bottom: 1px solid #ddd; }
-    main { display: grid; grid-template-columns: 360px 1fr; min-height: calc(100vh - 58px); }
-    #list { border-right: 1px solid #ddd; padding: 12px; overflow: auto; }
-    #viewer { padding: 16px; overflow: auto; }
-    .post { padding: 10px; border-bottom: 1px solid #eee; cursor: pointer; }
-    .post:hover { background: #f7f7f7; }
-    .meta { font-size: 12px; color: #666; }
-    pre { white-space: pre-wrap; word-break: break-word; }
-    img { max-width: 100%; height: auto; }
-    .hint { font-size: 12px; color: #666; }
-  </style>
+  <!-- 外だしCSS（このあと全文を貼る） -->
+  <link rel="stylesheet" href="./style.css" />
 </head>
 
 <body>
-  <header>
-    <strong>Matsuo Miyu Blog Viewer</strong>
-    <div class="hint">左で記事を選ぶと右に表示。URLの <code>#p=...</code> でも直接開けます。</div>
+  <header class="topbar">
+    <div class="topbar__title">Matsuo Miyu Blog Viewer</div>
+    <div class="topbar__hint">左の一覧で記事を選択。URLの <code>#p=...</code> でも直接開けます。</div>
   </header>
 
-  <main>
-    <section id="list">読み込み中...</section>
-    <section id="viewer">
-      <p class="hint">記事を選んでください。</p>
+  <main class="layout">
+    <!-- 左：プロフィール -->
+    <aside class="profile">
+      <div class="profile__card">
+        <div class="profile__avatarWrap">
+          <!-- 手元の画像を置くなら docs/assets/profile.jpg を用意して差し替え -->
+          <img class="profile__avatar" src="./assets/profile.jpg" alt="profile">
+        </div>
+
+        <div class="profile__name">松尾 美佑</div>
+        <div class="profile__sub">まつお みゆ</div>
+
+        <dl class="profile__meta">
+          <div><dt>生年月日</dt><dd>—</dd></div>
+          <div><dt>血液型</dt><dd>—</dd></div>
+          <div><dt>身長</dt><dd>—</dd></div>
+          <div><dt>星座</dt><dd>—</dd></div>
+        </dl>
+
+        <div class="profile__links">
+          <a class="btn" href="https://www.instagram.com/nogizaka46_official/" target="_blank" rel="noreferrer">Instagram</a>
+        </div>
+      </div>
+    </aside>
+
+    <!-- 中央：記事リスト（app.js がここに描画） -->
+    <section class="listPane">
+      <div class="listPane__head">
+        <div class="listPane__title">Posts</div>
+        <div class="listPane__meta" id="listMeta">読み込み中...</div>
+      </div>
+
+      <div id="list" class="list">
+        読み込み中...
+      </div>
+    </section>
+
+    <!-- 右：本文（app.js がここに描画） -->
+    <section class="viewerPane">
+      <div id="viewer" class="viewer">
+        <p class="hint">記事を選んでください。</p>
+      </div>
     </section>
   </main>
 
-  <!--
-    ここ重要：
-    docs/index/app.js を読み込む想定。
-    もし app.js を別の場所に置くなら、ここのパスだけ合わせればOK。
-  -->
+  <!-- app.js（あなたの場所に合わせる） -->
   <script type="module" src="./index/app.js"></script>
 </body>
 </html>
