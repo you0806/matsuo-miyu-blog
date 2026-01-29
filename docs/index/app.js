@@ -3,26 +3,82 @@
 // - posts一覧: ./index/posts.json
 // - 記事md:     ./posts/.../index.md
 // - 記事本文:   ./posts/.../page.html（index.md に「本文: page.html」等で指定）
-// - 画像:       page.html / md と同じフォルダ内 images/.. を想定
 //
-// ポイント：
-// 1) 先頭スラッシュの絶対パス "/posts/..." は使わない
-// 2) new URL("相対パス", "基準URL") で必ずURLを作る
-// 3) Windowsパス "\" は必ず "/" に直す
+// 重要：DOMのIDが変わっても動くように、list/viewer要素は複数候補から拾う。
 
-const listEl = document.getElementById("list");
-const viewerEl = document.getElementById("viewer");
+// =============================
+// DOM取得（IDが変わっても拾えるように）
+// =============================
+function pickEl(...selectors) {
+  for (const sel of selectors) {
+    const el = document.querySelector(sel);
+    if (el) return el;
+  }
+  return null;
+}
 
-// <base href="./"> がある前提で、Pagesの /<repo>/ を壊さない基準URLになる
+// あなたのUIに合わせて候補を増やしてある
+const listEl = pickEl(
+  "#list",
+  "#posts",
+  "#postsList",
+  "#postList",
+  "[data-role='list']",
+  "[data-list]"
+);
+
+const viewerEl = pickEl(
+  "#viewer",
+  "#content",
+  "#article",
+  "#post",
+  "[data-role='viewer']",
+  "[data-viewer]"
+);
+
+function fatal(msg) {
+  console.error(msg);
+  // 画面にも出す
+  const box = document.createElement("pre");
+  box.style.whiteSpace = "pre-wrap";
+  box.style.wordBreak = "break-word";
+  box.style.padding = "12px";
+  box.style.margin = "12px";
+  box.style.border = "1px solid #f99";
+  box.style.background = "#fff5f5";
+  box.textContent = msg;
+  document.body.prepend(box);
+}
+
+// DOMが想定と違うならここで止める（←今の症状はここが原因の可能性大）
+if (!listEl || !viewerEl) {
+  fatal(
+    [
+      "app.js: 必要な要素が見つかりません。",
+      `listEl: ${listEl ? "OK" : "NOT FOUND"}`,
+      `viewerEl: ${viewerEl ? "OK" : "NOT FOUND"}`,
+      "",
+      "index.html 側で id を確認してね。",
+      "例: <section id='list'> ... / <section id='viewer'> ...",
+      "あなたの新UIだと id が posts / content になってる可能性があるので、",
+      "このJSはそれも拾うようにしてあるけど、さらに違うなら候補を追加する。",
+    ].join("\n")
+  );
+  // ここでreturn（以降は動かない）
+  throw new Error("Required DOM elements not found.");
+}
+
+// =============================
+// URL基準
+// =============================
+// <base href="./"> がある想定。GitHub Pages の /<repo>/ を壊さない
 const SITE_ROOT = new URL(document.baseURI);
-
 // docs/index/posts.json → 公開URLでも /index/posts.json
 const POSTS_INDEX_URL = new URL("./index/posts.json", SITE_ROOT);
 
 // =============================
 // 便利関数
 // =============================
-
 function escapeHtml(s) {
   return String(s ?? "")
     .replaceAll("&", "&amp;")
@@ -32,7 +88,7 @@ function escapeHtml(s) {
     .replaceAll("'", "&#039;");
 }
 
-/** Windowsの \ を / に、先頭の ./ と / を除去して「サイトルート基準の相対」に寄せる */
+// Windowsの \ を / に、先頭の ./ と / を削って「サイトルート相対」に寄せる
 function normalizePath(p) {
   if (!p) return "";
   let s = String(p).trim();
@@ -42,7 +98,7 @@ function normalizePath(p) {
   return s;
 }
 
-/** hash から p を取り出す: 例 #p=posts/2025/.../index.md */
+// hash から p を取り出す（例: #p=posts/2025/.../index.md）
 function getPostPathFromHash() {
   const h = location.hash.replace(/^#/, "");
   const params = new URLSearchParams(h);
@@ -50,14 +106,14 @@ function getPostPathFromHash() {
   return p ? normalizePath(p) : null;
 }
 
-/** hash に p を入れる */
+// hash に p を入れる
 function setPostPathToHash(path) {
   const params = new URLSearchParams(location.hash.replace(/^#/, ""));
   params.set("p", normalizePath(path));
   location.hash = params.toString();
 }
 
-/** frontmatterっぽい先頭 --- ... --- を除去 */
+// frontmatterっぽい先頭 --- ... --- を除去
 function stripFrontMatter(mdText) {
   const text = String(mdText ?? "");
   if (!text.startsWith("---")) return text;
@@ -68,26 +124,18 @@ function stripFrontMatter(mdText) {
 }
 
 /**
- * index.md の中から「本文: page.html」みたいな指定を拾う（強化版）
- * 対応する例:
+ * index.md の中から「本文: page.html」指定を拾う（強化版）
+ * 対応例:
  *  - 本文: page.html
- *  - 本文：page.html   （全角コロン）
- *  -   本文 : page.html（先頭スペース）
- *  - - 本文: page.html （箇条書き）
+ *  - 本文：page.html（全角コロン）
+ *  - - 本文: page.html（箇条書き）
  *  - body: page.html
  */
 function findBodyFileRef(mdText) {
-  const t = String(mdText ?? "");
-
-  // 行ごとに見る（正規表現1発より堅い）
-  const lines = t.split("\n");
+  const lines = String(mdText ?? "").split("\n");
   for (const line of lines) {
     const s = line.trim();
-
-    // 先頭の "- " や "・" を許容
     const cleaned = s.replace(/^[-•・]\s*/, "");
-
-    // "本文" or "body" + ":" or "：" を許容
     const m = cleaned.match(/^(本文|body)\s*[:：]\s*(.+)\s*$/i);
     if (m) {
       const ref = m[2]?.trim();
@@ -98,26 +146,25 @@ function findBodyFileRef(mdText) {
 }
 
 /**
- * Markdownを“最低限”HTMLっぽく表示（凝った変換はしない）
- * - 見出し(#) / 画像(![]) / リンク([]()) だけ軽く対応
+ * Markdownを“最低限”HTMLっぽく表示
  */
 function renderMarkdownRough(mdText, mdFileUrl) {
   const mdDir = new URL("./", mdFileUrl);
 
   const lines = mdText.split("\n");
-  const html = lines
+  return lines
     .map((line) => {
       if (line.startsWith("### ")) return `<h3>${escapeHtml(line.slice(4))}</h3>`;
       if (line.startsWith("## ")) return `<h2>${escapeHtml(line.slice(3))}</h2>`;
       if (line.startsWith("# ")) return `<h1>${escapeHtml(line.slice(2))}</h1>`;
 
-      // 画像 ![alt](path)
+      // 画像
       line = line.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_, alt, src) => {
         const imgUrl = new URL(src, mdDir);
         return `<img alt="${escapeHtml(alt)}" src="${imgUrl.href}">`;
       });
 
-      // リンク [text](url)
+      // リンク
       line = line.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, text, href) => {
         const linkUrl = new URL(href, mdDir);
         return `<a href="${linkUrl.href}" target="_blank" rel="noreferrer">${escapeHtml(
@@ -129,14 +176,11 @@ function renderMarkdownRough(mdText, mdFileUrl) {
       return `<p>${escapeHtml(line)}</p>`;
     })
     .join("");
-
-  return html;
 }
 
 // =============================
-// posts.json 読み込み＆整形
+// posts.json 読み込み & 整形
 // =============================
-
 async function loadPostsIndex() {
   const res = await fetch(POSTS_INDEX_URL.href, { cache: "no-store" });
   if (!res.ok) {
@@ -147,21 +191,16 @@ async function loadPostsIndex() {
   return await res.json();
 }
 
-/**
- * posts.json の1件を「表示用の標準形」に変換
- * あなたのJSON例:
- * { id, title, datetime, url, local_dir, images: [...] }
- */
+// あなたのJSON: { id, title, datetime, url, local_dir, images: [...] }
 function toViewModel(raw) {
   const title = raw.title ?? "(no title)";
   const date = raw.datetime ?? raw.date ?? "";
   const orig = raw.url ?? raw.source_url ?? "";
 
-  // 最優先：raw.path があればそれを使う（すでに相対になってる想定）
+  // 1) raw.path があればそれ優先
   let path = raw.path ? normalizePath(raw.path) : "";
 
-  // 次：local_dir から index.md を組み立てる
-  // 例: "posts\\2025\\2025-04-23_1409_103378" → "posts/2025/2025-04-23_1409_103378/index.md"
+  // 2) local_dir があれば index.md を組み立て
   if (!path && raw.local_dir) {
     const dir = normalizePath(raw.local_dir);
     path = normalizePath(`${dir}/index.md`);
@@ -180,12 +219,14 @@ function toViewModel(raw) {
 function renderPostList(posts) {
   listEl.innerHTML = "";
 
-  // ちょいデバッグ（消したければ消してOK）
+  // 一番上に情報（デバッグ用。不要なら消してOK）
   const info = document.createElement("div");
   info.className = "hint";
   info.innerHTML = `
     <div>posts: ${posts.length}</div>
-    <div>index: <a href="${POSTS_INDEX_URL.href}" target="_blank" rel="noreferrer">${POSTS_INDEX_URL.href}</a></div>
+    <div>index: <a href="${POSTS_INDEX_URL.href}" target="_blank" rel="noreferrer">${escapeHtml(
+      POSTS_INDEX_URL.href
+    )}</a></div>
     <hr>
   `;
   listEl.appendChild(info);
@@ -218,7 +259,6 @@ function renderPostList(posts) {
 // =============================
 // 記事オープン
 // =============================
-
 async function openPostByPath(postPath) {
   const rel = normalizePath(postPath);
   if (!rel) return;
@@ -244,9 +284,8 @@ async function openPostByPath(postPath) {
 
   const mdDir = new URL("./", mdUrl);
 
-  // index.md に本文ファイル指定があるなら、それを優先して表示
+  // 本文ファイル指定があれば iframe 表示
   const bodyRef = findBodyFileRef(mdText);
-
   if (bodyRef) {
     const bodyUrl = new URL(normalizePath(bodyRef), mdDir);
 
@@ -267,9 +306,8 @@ async function openPostByPath(postPath) {
     return;
   }
 
-  // 見つからなければ Markdown を雑表示
+  // 無ければMarkdownを雑表示
   const bodyHtml = renderMarkdownRough(mdText, mdUrl);
-
   viewerEl.innerHTML = `
     <div class="meta">source: <a href="${mdUrl.href}" target="_blank" rel="noreferrer">${escapeHtml(
       rel
@@ -282,7 +320,6 @@ async function openPostByPath(postPath) {
 // =============================
 // main
 // =============================
-
 async function main() {
   try {
     const rawPosts = await loadPostsIndex();
@@ -298,20 +335,28 @@ async function main() {
       return;
     }
 
-    // hash が無い場合は先頭の記事を自動で開く（サンプル表示）
+    // サンプル表示（hashが無いときは先頭を開く）
     const first = posts[0];
     if (first?.path) {
       setPostPathToHash(first.path);
       openPostByPath(first.path);
+    } else {
+      viewerEl.innerHTML = `<p class="hint">記事が見つかりません（posts.json の中身確認してね）</p>`;
     }
   } catch (e) {
+    // listEl がある前提なので画面に出せる
     listEl.innerHTML = `<pre>${escapeHtml(String(e))}</pre>`;
+    console.error(e);
   }
 }
 
+// hash 変更で記事切り替え
 window.addEventListener("hashchange", () => {
   const p = getPostPathFromHash();
   if (p) openPostByPath(p);
 });
 
-main();
+// DOMができてから実行（新UIでscriptの位置が変わっても安全）
+window.addEventListener("DOMContentLoaded", () => {
+  main();
+});
