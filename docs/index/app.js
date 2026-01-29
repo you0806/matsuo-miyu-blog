@@ -2,15 +2,12 @@
 // GitHub Pages で「パスが壊れない」ことを最優先にしたビューア。
 // - posts一覧: ./index/posts.json
 // - 記事md:     ./posts/.../index.md
-// - 本文:       ./posts/.../page.html（index.mdに「本文: page.html」など）
+// - 本文:       ./posts/.../page.html（index.md内に「本文: page.html」など）
 //
-// 改良点（今回）:
-// 1) body(page.html) があれば iframe で表示
-// 2) iframe がダメな環境でも、fetch→innerHTML で本文を直表示（フォールバック）
-// 3) どこで詰まったか分かるように viewer にステータスを出す
-//
-// ★重要修正:
-// - showBodyHtml() が viewer 全体を上書きしない（上書き合戦で表示が消えるのを防ぐ）
+// 重要な安定化（今回）:
+// 1) viewer を何度も全面 innerHTML 上書きしない（骨格は1回だけ作る）
+// 2) 読み込みトークンで “最新以外の結果” を破棄（レース対策）
+// 3) fallback 直表示時に page.html の相対URLを絶対URLへ書き換え
 
 // =============================
 // DOM取得（IDが変わっても拾えるように）
@@ -78,9 +75,9 @@ if (!listEl || !viewerEl) {
 }
 
 // =============================
-// URL基準
+// URL基準（<base href="./"> 前提）
 // =============================
-const SITE_ROOT = new URL(document.baseURI);
+const SITE_ROOT = new URL(document.baseURI);               // 例: https://you0806.github.io/matsuo-miyu-blog/
 const POSTS_INDEX_URL = new URL("./index/posts.json", SITE_ROOT);
 
 // =============================
@@ -89,7 +86,7 @@ const POSTS_INDEX_URL = new URL("./index/posts.json", SITE_ROOT);
 function normalizePath(p) {
   if (!p) return "";
   let s = String(p).trim();
-  s = s.replaceAll("\\", "/");
+  s = s.replaceAll("\\", "/");  // Windowsパス対策
   s = s.replace(/^\.\/+/, "");
   s = s.replace(/^\/+/, "");
   return s;
@@ -104,7 +101,17 @@ function getPostPathFromHash() {
 
 function setPostPathToHash(path) {
   const params = new URLSearchParams(location.hash.replace(/^#/, ""));
-  params.set("p", normalizePath(path));
+  params.set("p", normalizePath(path(path));
+  location.hash = params.toString();
+}
+
+// 上の setPostPathToHash の typo 防止
+function normalizePathSafe(p) {
+  return normalizePath(p);
+}
+function setPostPathToHash(path) {
+  const params = new URLSearchParams(location.hash.replace(/^#/, ""));
+  params.set("p", normalizePathSafe(path));
   location.hash = params.toString();
 }
 
@@ -141,14 +148,16 @@ function renderMarkdownRough(mdText, mdFileUrl) {
   return lines
     .map((line) => {
       if (line.startsWith("### ")) return `<h3>${escapeHtml(line.slice(4))}</h3>`;
-      if (line.startsWith("## ")) return `<h2>${escapeHtml(line.slice(3))}</h2>`;
-      if (line.startsWith("# ")) return `<h1>${escapeHtml(line.slice(2))}</h1>`;
+      if (line.startsWith("## "))  return `<h2>${escapeHtml(line.slice(3))}</h2>`;
+      if (line.startsWith("# "))   return `<h1>${escapeHtml(line.slice(2))}</h1>`;
 
+      // 画像 ![alt](path)
       line = line.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_, alt, src) => {
         const imgUrl = new URL(src, mdDir);
         return `<img alt="${escapeHtml(alt)}" src="${imgUrl.href}">`;
       });
 
+      // リンク [text](url)
       line = line.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, text, href) => {
         const linkUrl = new URL(href, mdDir);
         return `<a href="${linkUrl.href}" target="_blank" rel="noreferrer">${escapeHtml(
@@ -160,6 +169,47 @@ function renderMarkdownRough(mdText, mdFileUrl) {
       return `<p>${escapeHtml(line)}</p>`;
     })
     .join("");
+}
+
+// =============================
+// page.html fallback 用: 相対URLを絶対URLへ
+// =============================
+function rebaseHtml(htmlText, baseUrl) {
+  try {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(String(htmlText ?? ""), "text/html");
+
+    // script は念のため除去
+    doc.querySelectorAll("script").forEach((s) => s.remove());
+
+    // href/src を絶対化
+    const attrs = [
+      ["a", "href"],
+      ["img", "src"],
+      ["link", "href"],
+      ["source", "src"],
+      ["video", "src"],
+      ["audio", "src"],
+      ["iframe", "src"],
+    ];
+
+    for (const [sel, attr] of attrs) {
+      doc.querySelectorAll(`${sel}[${attr}]`).forEach((el) => {
+        const v = el.getAttribute(attr);
+        if (!v) return;
+        // data:, mailto:, javascript: は触らない
+        if (/^(data:|mailto:|javascript:|#)/i.test(v)) return;
+        try {
+          el.setAttribute(attr, new URL(v, baseUrl).href);
+        } catch {}
+      });
+    }
+
+    return doc.body ? doc.body.innerHTML : String(htmlText ?? "");
+  } catch (e) {
+    console.warn("rebaseHtml failed:", e);
+    return String(htmlText ?? "");
+  }
 }
 
 // =============================
@@ -236,102 +286,119 @@ function renderPostList(posts) {
 }
 
 // =============================
-// 本文表示（iframe + fetch fallback）
+// viewer レンダー骨格（1回で作る）
 // =============================
-function setViewerHtml(html) {
-  viewerEl.innerHTML = html;
-}
-
-function setText(el, text) {
-  if (!el) return;
-  el.textContent = text;
-}
-
-function removeScripts(html) {
-  // 最低限：scriptタグだけ除去（安全寄り）
-  return String(html ?? "").replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, "");
-}
-
-/**
- * viewer全体は触らず、指定の mountEl の中だけ埋める
- */
-async function showBodyHtml(bodyUrl, mountEl, statusEl) {
-  if (!mountEl) return;
-
-  mountEl.innerHTML = `
-    <iframe
-      id="bodyFrame"
-      src="${bodyUrl.href}"
-      style="width:100%; height: 78vh; border:1px solid #eee; border-radius:12px; background:#fff;"
-      loading="lazy"
-    ></iframe>
-
-    <div class="hint" style="margin-top:8px;">
-      もしここが真っ白なら、下のフォールバック（直表示）を試します…
-    </div>
-    <div id="bodyFallback" class="hint"></div>
+function renderViewerShell({ sourceUrl, sourceLabel, bodyUrl, bodyLabel }) {
+  viewerEl.innerHTML = `
+    <div class="meta" id="metaSource"></div>
+    <div class="meta" id="metaBody"></div>
+    <div class="meta" id="metaStatus"></div>
+    <hr>
+    <div id="viewerMain" class="viewerMain"></div>
+    <div id="viewerExtra" class="hint" style="margin-top:8px;"></div>
   `;
 
-  const iframe = mountEl.querySelector("#bodyFrame");
-  const fallback = mountEl.querySelector("#bodyFallback");
+  const metaSource = viewerEl.querySelector("#metaSource");
+  const metaBody = viewerEl.querySelector("#metaBody");
 
-  // iframeの状態
-  if (iframe) {
-    iframe.addEventListener("load", () => {
-      setText(statusEl, "status: iframe loaded");
-    });
-    // すぐ「ロード中」を出す
-    setText(statusEl, "status: iframe loading...");
-  }
+  metaSource.innerHTML = sourceUrl
+    ? `source: <a href="${sourceUrl}" target="_blank" rel="noreferrer">${escapeHtml(sourceLabel ?? sourceUrl)}</a>`
+    : "";
 
-  // 少し待ってフォールバック（iframeが表示できない環境でも本文が出る）
-  setTimeout(async () => {
-    try {
-      const res = await fetch(bodyUrl.href, { cache: "no-store" });
-      if (!res.ok) {
-        if (fallback) {
-          fallback.innerHTML = `<pre>${escapeHtml(
-            `fallback fetch failed: ${res.status} ${res.statusText}\n${bodyUrl.href}`
-          )}</pre>`;
-        }
-        return;
-      }
+  metaBody.innerHTML = bodyUrl
+    ? `body: <a href="${bodyUrl}" target="_blank" rel="noreferrer">${escapeHtml(bodyLabel ?? bodyUrl)}</a>`
+    : "";
+}
 
-      const htmlText = await res.text();
-      const safeHtml = removeScripts(htmlText);
+function setStatus(text) {
+  const el = viewerEl.querySelector("#metaStatus");
+  if (el) el.textContent = `status: ${text}`;
+}
 
-      if (fallback) {
-        fallback.innerHTML = `
-          <details>
-            <summary>フォールバックで本文を直表示（クリックで開く）</summary>
-            <div style="border:1px solid #eee; border-radius:12px; padding:12px; margin-top:8px; background:#fff;">
-              ${safeHtml}
-            </div>
-          </details>
-        `;
-      }
-    } catch (e) {
-      if (fallback) {
-        fallback.innerHTML = `<pre>${escapeHtml(`fallback error: ${String(e)}`)}</pre>`;
-      }
-    }
-  }, 500);
+function setMainHtml(html) {
+  const el = viewerEl.querySelector("#viewerMain");
+  if (el) el.innerHTML = html;
+}
+
+function setExtraHtml(html) {
+  const el = viewerEl.querySelector("#viewerExtra");
+  if (el) el.innerHTML = html;
 }
 
 // =============================
-// 記事オープン
+// 本文表示（iframe + fetch fallback）
 // =============================
+function mountIframe(bodyUrl) {
+  setMainHtml(`
+    <iframe
+      id="bodyFrame"
+      src="${bodyUrl}"
+      style="width:100%; height:78vh; border:1px solid #eee; border-radius:12px; background:#fff;"
+      loading="lazy"
+    ></iframe>
+  `);
+}
+
+async function runFallback(token, bodyUrlObj) {
+  // tokenが古ければ何もしない
+  if (token !== openToken) return;
+
+  try {
+    const res = await fetch(bodyUrlObj.href, { cache: "no-store" });
+    if (!res.ok) {
+      setExtraHtml(`<pre>${escapeHtml(
+        `fallback fetch failed: ${res.status} ${res.statusText}\n${bodyUrlObj.href}`
+      )}</pre>`);
+      return;
+    }
+    const htmlText = await res.text();
+    if (token !== openToken) return;
+
+    const rebased = rebaseHtml(htmlText, bodyUrlObj);
+
+    setExtraHtml(`
+      <details>
+        <summary>フォールバックで本文を直表示（クリックで開く）</summary>
+        <div style="border:1px solid #eee; border-radius:12px; padding:12px; margin-top:8px; background:#fff;">
+          ${rebased}
+        </div>
+      </details>
+    `);
+  } catch (e) {
+    if (token !== openToken) return;
+    setExtraHtml(`<pre>${escapeHtml(`fallback error: ${String(e)}`)}</pre>`);
+  }
+}
+
+// =============================
+// 記事オープン（レース対策トークン）
+// =============================
+let openToken = 0;
+
 async function openPostByPath(postPath) {
   const rel = normalizePath(postPath);
   if (!rel) return;
 
+  const token = ++openToken; // これが “今回の読み込み” の番号
+
   const mdUrl = new URL(rel, SITE_ROOT);
 
-  setViewerHtml(`<p class="hint">読み込み中...<br><code>${escapeHtml(mdUrl.href)}</code></p>`);
+  renderViewerShell({
+    sourceUrl: mdUrl.href,
+    sourceLabel: rel,
+    bodyUrl: "",
+    bodyLabel: "",
+  });
+  setStatus("loading markdown...");
+  setMainHtml(`<p class="hint">読み込み中...<br><code>${escapeHtml(mdUrl.href)}</code></p>`);
+  setExtraHtml("");
 
   const res = await fetch(mdUrl.href, { cache: "no-store" });
+  if (token !== openToken) return;
+
   if (!res.ok) {
-    setViewerHtml(`
+    setStatus("markdown fetch failed");
+    setMainHtml(`
       <p>記事の読み込みに失敗しました。</p>
       <pre>${escapeHtml(`${res.status} ${res.statusText}\n${mdUrl.href}`)}</pre>
       <p class="hint">posts.json の path / local_dir と実ファイルの場所が一致しているか確認してね。</p>
@@ -340,42 +407,54 @@ async function openPostByPath(postPath) {
   }
 
   const rawMd = await res.text();
+  if (token !== openToken) return;
+
   const mdText = stripFrontMatter(rawMd);
   const mdDir = new URL("./", mdUrl);
 
   const bodyRef = findBodyFileRef(mdText);
+
   if (bodyRef) {
-    const bodyUrl = new URL(normalizePath(bodyRef), mdDir);
+    const bodyUrlObj = new URL(normalizePath(bodyRef), mdDir);
 
-    // viewerの枠を先に作る（ここがポイント：この後は枠の中だけ更新する）
-    setViewerHtml(`
-      <div class="meta">source: <a href="${mdUrl.href}" target="_blank" rel="noreferrer">${escapeHtml(
-        rel
-      )}</a></div>
-      <div class="meta">body: <a href="${bodyUrl.href}" target="_blank" rel="noreferrer">${escapeHtml(
-        bodyRef
-      )}</a></div>
-      <div class="meta" id="statusLine">status: preparing...</div>
-      <hr>
-      <div id="bodyMount"></div>
-    `);
+    // シェルを “一回だけ” 作り直して、メタだけ固定
+    renderViewerShell({
+      sourceUrl: mdUrl.href,
+      sourceLabel: rel,
+      bodyUrl: bodyUrlObj.href,
+      bodyLabel: bodyRef,
+    });
 
-    const mountEl = viewerEl.querySelector("#bodyMount");
-    const statusEl = viewerEl.querySelector("#statusLine");
+    setStatus("iframe loading...");
+    mountIframe(bodyUrlObj.href);
+    setExtraHtml(`<span class="hint">もし本文が真っ白なら、数秒後にフォールバックが出ます。</span>`);
 
-    await showBodyHtml(bodyUrl, mountEl, statusEl);
+    const iframe = viewerEl.querySelector("#bodyFrame");
+    if (iframe) {
+      iframe.addEventListener("load", () => {
+        // 最新の読み込みだけ反映
+        if (token !== openToken) return;
+        setStatus("iframe loaded");
+      });
+      iframe.addEventListener("error", () => {
+        if (token !== openToken) return;
+        setStatus("iframe error (fallback soon)");
+      });
+    }
+
+    // 少し待ってから fallback（Safari等でiframeが微妙でも本文出す）
+    setTimeout(() => {
+      runFallback(token, bodyUrlObj);
+    }, 800);
+
     return;
   }
 
   // 本文指定が無ければMarkdownを雑表示
+  setStatus("render markdown");
   const bodyHtml = renderMarkdownRough(mdText, mdUrl);
-  setViewerHtml(`
-    <div class="meta">source: <a href="${mdUrl.href}" target="_blank" rel="noreferrer">${escapeHtml(
-      rel
-    )}</a></div>
-    <hr>
-    ${bodyHtml}
-  `);
+  setMainHtml(bodyHtml);
+  setExtraHtml("");
 }
 
 // =============================
@@ -400,7 +479,9 @@ async function main() {
       setPostPathToHash(first.path);
       openPostByPath(first.path);
     } else {
-      setViewerHtml(`<p class="hint">記事が見つかりません（posts.json の中身確認してね）</p>`);
+      renderViewerShell({ sourceUrl: "", bodyUrl: "" });
+      setStatus("no posts");
+      setMainHtml(`<p class="hint">記事が見つかりません（posts.json の中身確認してね）</p>`);
     }
   } catch (e) {
     listEl.innerHTML = `<pre>${escapeHtml(String(e))}</pre>`;
@@ -413,5 +494,6 @@ window.addEventListener("hashchange", () => {
   if (p) openPostByPath(p);
 });
 
-// module scriptはdeferなので、普通に main() でOK（ブレにくい）
-main();
+window.addEventListener("DOMContentLoaded", () => {
+  main();
+});
