@@ -5,7 +5,6 @@ import json
 import re
 import time
 from dataclasses import dataclass, asdict
-from datetime import datetime
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
@@ -13,16 +12,27 @@ import requests
 from bs4 import BeautifulSoup
 
 BASE = "https://www.nogizaka46.com"
+CT = "55386"  # 松尾美佑 ct
 
-# 松尾美佑のブログ一覧（ct は公式側で変わる可能性あり）
-LIST_URL = "https://www.nogizaka46.com/s/n46/diary/MEMBER/list?ct=55386&cd=MEMBER"
+# ここが重要：dy=YYYYMM（月）を渡して月ごとに一覧を取る
+LIST_URL = "https://www.nogizaka46.com/s/n46/diary/MEMBER/list?cd=MEMBER&ct={ct}&dy={ym}&page={page}"
 
-# ★ docs 配下に吐く（GitHub Pages 用）
-OUT_DIR = Path(__file__).resolve().parents[1] / "docs"
-POSTS_DIR = OUT_DIR / "posts"
-INDEX_DIR = OUT_DIR / "index"
+# リポジトリ構成：repo/scripts/fetch.py なので repo は parents[1]
+REPO_DIR = Path(__file__).resolve().parents[1]
+SITE_DIR = REPO_DIR / "docs"          # GitHub Pages 公開ルート
+POSTS_DIR = SITE_DIR / "posts"
+INDEX_DIR = SITE_DIR / "index"
+DEBUG_DIR = SITE_DIR / "_debug_fetch"  # 任意（調査用）
 
-HEADERS = {"User-Agent": "matsuo-miyu-blog/1.0 (personal archive)"}
+# ふつうのブラウザUAに寄せる（これでリンク0になる系がかなり減る）
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "ja,en-US;q=0.8,en;q=0.6",
+}
 
 SLEEP_SEC = 1.0
 IMG_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".gif")
@@ -34,14 +44,14 @@ class PostIndex:
     title: str
     datetime: str
     url: str
-    local_dir: str
-    images: list[str]      # repo-relative paths (docs/ からの相対)
+    local_dir: str        # docs からの相対（= GitHub Pages ルート相対にする）
+    images: list[str]     # docs からの相対
     links_in_post: list[str]
 
 
 def _dedup_keep(seq: list[str]) -> list[str]:
-    out: list[str] = []
-    seen: set[str] = set()
+    out = []
+    seen = set()
     for x in seq:
         if x not in seen:
             out.append(x)
@@ -49,18 +59,44 @@ def _dedup_keep(seq: list[str]) -> list[str]:
     return out
 
 
-def get_soup(url: str) -> BeautifulSoup:
+def get(url: str) -> requests.Response:
     r = requests.get(url, headers=HEADERS, timeout=30, allow_redirects=True)
     r.raise_for_status()
-    return BeautifulSoup(r.text, "html.parser")
+    return r
+
+
+def get_soup(url: str) -> BeautifulSoup:
+    return BeautifulSoup(get(url).text, "html.parser")
 
 
 def normalize_detail_url(u: str) -> str:
+    # ?ima=... 等を落とす
     return re.sub(r"\?.*$", "", u)
 
 
-def extract_detail_urls_from_list(soup: BeautifulSoup) -> list[str]:
-    urls: list[str] = []
+def ym_range_desc(start_ym: int, end_ym: int) -> list[int]:
+    """
+    start_ym=202601, end_ym=202001 のように、YYYYMM を降順で列挙
+    """
+    y, m = divmod(start_ym, 100)
+    ey, em = divmod(end_ym, 100)
+
+    out = []
+    while True:
+        out.append(y * 100 + m)
+        if y == ey and m == em:
+            break
+        m -= 1
+        if m == 0:
+            y -= 1
+            m = 12
+    return out
+
+
+def extract_detail_links_from_list_html(html: str) -> list[str]:
+    soup = BeautifulSoup(html, "html.parser")
+
+    urls = []
     for a in soup.select('a[href*="/s/n46/diary/detail/"]'):
         href = a.get("href")
         if not href:
@@ -68,41 +104,59 @@ def extract_detail_urls_from_list(soup: BeautifulSoup) -> list[str]:
         full = urljoin(BASE, href)
         if "/s/n46/diary/detail/" in full:
             urls.append(normalize_detail_url(full))
+
     return _dedup_keep(urls)
 
 
-# ✅ dy は YYYYMMDD が正解（あなたの検証で /detail/ が出た形式）
-def extract_post_urls_paged(dy_yyyymmdd: str) -> list[str]:
-    urls: list[str] = []
-    page = 1
-    empty_streak = 0
+def extract_post_urls_monthly(start_ym: int, end_ym: int) -> list[str]:
+    """
+    月ごとにページ送りしながら detail URL を集める。
+    「リンクが0」の月はスキップする。
+    """
+    all_urls: list[str] = []
 
-    while True:
-        page_url = f"{LIST_URL}&dy={dy_yyyymmdd}&page={page}"
-        print(f"[LIST] fetching: {page_url}")
-        soup = get_soup(page_url)
+    for ym in ym_range_desc(start_ym, end_ym):
+        page = 1
+        month_urls: list[str] = []
+        empty_streak = 0
 
-        found = extract_detail_urls_from_list(soup)
-        print(f"[LIST] page={page} found={len(found)} total_before={len(urls)}")
+        while True:
+            url = LIST_URL.format(ct=CT, ym=ym, page=page)
+            print(f"[LIST] ym={ym} page={page} -> {url}")
+            r = get(url)
+            html = r.text
 
-        if not found:
-            empty_streak += 1
-            # 空ページが続いたら終わり（サイト側のページング差に強い）
-            if empty_streak >= 2:
-                break
+            found = extract_detail_links_from_list_html(html)
+            print(f"[LIST] ym={ym} page={page} status={r.status_code} found={len(found)}")
+
+            if page == 1:
+                # 調査用に保存（「found=0」が続くとき原因追える）
+                DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+                (DEBUG_DIR / f"list_{ym}_p{page}.html").write_text(html, encoding="utf-8")
+
+            if not found:
+                empty_streak += 1
+                # 1ページ目から0なら、その月に記事が無い可能性が高いので月を終了
+                if page == 1:
+                    break
+                # 途中ページで0が続いたら終端
+                if empty_streak >= 2:
+                    break
+            else:
+                empty_streak = 0
+                month_urls.extend(found)
+
+            page += 1
+            time.sleep(SLEEP_SEC)
+
+        month_urls = _dedup_keep(month_urls)
+        if month_urls:
+            print(f"[LIST] ym={ym} total month urls: {len(month_urls)}")
+            all_urls.extend(month_urls)
         else:
-            empty_streak = 0
-            urls.extend(found)
-            urls = _dedup_keep(urls)
+            print(f"[LIST] ym={ym} no posts")
 
-        page += 1
-        time.sleep(SLEEP_SEC)
-
-        if page > 300:  # 念のため無限ループ防止
-            break
-
-    print(f"[LIST] found {len(urls)} post urls")
-    return urls
+    return _dedup_keep(all_urls)
 
 
 def parse_post(url: str):
@@ -118,7 +172,7 @@ def parse_post(url: str):
     if not title:
         title = "no-title"
 
-    # datetime（ページ内テキストから拾う）
+    # datetime
     text_all = soup.get_text("\n", strip=True)
     m = re.search(r"(\d{4}\.\d{2}\.\d{2}\s+\d{2}:\d{2})", text_all)
     dt = m.group(1) if m else "unknown"
@@ -128,7 +182,7 @@ def parse_post(url: str):
     pid = m2.group(1) if m2 else "unknown"
 
     # images
-    image_urls: list[str] = []
+    image_urls = []
     for img in soup.select("img[src]"):
         src = img.get("src") or ""
         full = urljoin(BASE, src)
@@ -137,7 +191,7 @@ def parse_post(url: str):
     image_urls = _dedup_keep(image_urls)
 
     # links
-    links: list[str] = []
+    links = []
     for a in soup.select("a[href]"):
         links.append(urljoin(BASE, a["href"]))
     links = _dedup_keep(links)
@@ -149,7 +203,7 @@ def parse_post(url: str):
 def download(url: str, out_path: Path) -> bool:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        r = requests.get(url, headers=HEADERS, timeout=60, allow_redirects=True)
+        r = requests.get(url, headers=HEADERS, timeout=60)
         r.raise_for_status()
         out_path.write_bytes(r.content)
         return True
@@ -175,58 +229,66 @@ def rewrite_html_images_to_local(raw_html: str, mapping: dict[str, str]) -> str:
     return str(soup)
 
 
+def load_existing_index() -> tuple[list[dict], set[str]]:
+    p = INDEX_DIR / "posts.json"
+    if not p.exists():
+        return [], set()
+    data = json.load(open(p, "r", encoding="utf-8"))
+    ids = set()
+    for x in data:
+        if isinstance(x, dict) and "id" in x:
+            ids.add(str(x["id"]))
+    print(f"[SKIP] existing posts.json detected. existing ids: {len(ids)}")
+    return data, ids
+
+
 def main():
     POSTS_DIR.mkdir(parents=True, exist_ok=True)
     INDEX_DIR.mkdir(parents=True, exist_ok=True)
 
-    # 既存 index 読み込み（増分DL）
-    existing_ids: set[str] = set()
-    existing_index_path = INDEX_DIR / "posts.json"
-    if existing_index_path.exists():
-        try:
-            old = json.loads(existing_index_path.read_text(encoding="utf-8"))
-            for x in old:
-                if isinstance(x, dict) and x.get("id"):
-                    existing_ids.add(str(x["id"]))
-            print(f"[SKIP] existing posts.json detected. existing ids: {len(existing_ids)}")
-        except Exception as e:
-            print(f"[WARN] failed to read existing posts.json: {e}")
+    existing_data, existing_ids = load_existing_index()
 
-    # ✅ dy=今日(YYYYMMDD) 固定で全ページ回収
-    dy_today = datetime.now().strftime("%Y%m%d")
-    post_urls = extract_post_urls_paged(dy_today)
+    # 2020年以降ぜんぶ取りたいなら end_ym を 202001 に。
+    # いま「2025/12 まで欲しい」なら start_ym を 202601（最新付近）にして降順で集めるのが安定。
+    post_urls = extract_post_urls_monthly(start_ym=202601, end_ym=202001)
+    print(f"[LIST] found {len(post_urls)} post urls")
 
-    # 既存 index を土台にして上書き更新
     index: list[PostIndex] = []
-    if existing_index_path.exists():
+
+    # 既存の posts.json を引き継ぐ（= 追加分だけ取る）
+    # ただし local_dir/path は docs ルート相対に直す
+    for x in existing_data:
         try:
-            old = json.loads(existing_index_path.read_text(encoding="utf-8"))
-            for x in old:
-                if isinstance(x, dict):
-                    index.append(
-                        PostIndex(
-                            id=str(x.get("id", "")),
-                            title=str(x.get("title", "")),
-                            datetime=str(x.get("datetime", "")),
-                            url=str(x.get("url", "")),
-                            local_dir=str(x.get("local_dir", "")),
-                            images=list(x.get("images", [])),
-                            links_in_post=list(x.get("links_in_post", [])),
-                        )
-                    )
+            # docs/ が混ざってたら除去
+            local_dir = str(x.get("local_dir", "")).replace("\\", "/")
+            if local_dir.startswith("docs/"):
+                local_dir = local_dir[5:]
+            images = x.get("images", [])
+            if isinstance(images, list):
+                images = [s.replace("\\", "/")[5:] if isinstance(s, str) and s.replace("\\", "/").startswith("docs/") else s for s in images]
+            index.append(
+                PostIndex(
+                    id=str(x.get("id", "")),
+                    title=str(x.get("title", "")),
+                    datetime=str(x.get("datetime", "")),
+                    url=str(x.get("url", "")),
+                    local_dir=local_dir,
+                    images=images if isinstance(images, list) else [],
+                    links_in_post=x.get("links_in_post", []) if isinstance(x.get("links_in_post", []), list) else [],
+                )
+            )
         except Exception:
-            index = []
+            pass
 
     added = 0
 
     for i, url in enumerate(post_urls, 1):
-        m = re.search(r"/diary/detail/(\d+)", url)
-        pid = m.group(1) if m else "unknown"
-
+        m2 = re.search(r"/diary/detail/(\d+)", url)
+        pid = m2.group(1) if m2 else "unknown"
         if pid in existing_ids:
             continue
 
-        print(f"[NEW {added+1}] ({i}/{len(post_urls)}) {url}")
+        print(f"[{i}/{len(post_urls)}] NEW {url}")
 
         title, dt, pid, image_urls, links, raw_html = parse_post(url)
 
@@ -235,12 +297,13 @@ def main():
         folder_name = safe_folder(f"{dt_folder}_{pid}") if dt != "unknown" else safe_folder(pid)
 
         post_dir = POSTS_DIR / year / folder_name
+        img_dir = post_dir / "images"
         post_dir.mkdir(parents=True, exist_ok=True)
 
         (post_dir / "page_raw.html").write_text(raw_html, encoding="utf-8")
 
-        mapping_for_html: dict[str, str] = {}
-        saved_imgs: list[str] = []
+        mapping_for_html = {}
+        saved_imgs = []
 
         for n, img_url in enumerate(image_urls, 1):
             path = urlparse(img_url).path
@@ -249,8 +312,8 @@ def main():
             out_path = post_dir / rel
 
             if download(img_url, out_path):
-                # docs/ からの相対で保存（ビューアが参照しやすい）
-                saved_imgs.append(str(out_path.relative_to(OUT_DIR)))
+                # docs ルート相対
+                saved_imgs.append(str(out_path.relative_to(SITE_DIR)).replace("\\", "/"))
                 mapping_for_html[re.sub(r"\?.*$", "", img_url)] = rel
 
             time.sleep(SLEEP_SEC)
@@ -275,13 +338,16 @@ source_url: "{url}"
             encoding="utf-8",
         )
 
+        # docs ルート相対（重要）
+        local_dir_rel = str(post_dir.relative_to(SITE_DIR)).replace("\\", "/")
+
         index.append(
             PostIndex(
                 id=pid,
                 title=title,
                 datetime=dt,
                 url=url,
-                local_dir=str(post_dir.relative_to(OUT_DIR)),
+                local_dir=local_dir_rel,
                 images=saved_imgs,
                 links_in_post=links,
             )
@@ -291,23 +357,19 @@ source_url: "{url}"
         added += 1
         time.sleep(SLEEP_SEC)
 
-    # 日付降順っぽく並べたいならここ（unknown は最後）
-    def sort_key(p: PostIndex):
-        # "2025.04.23 14:09" -> "2025-04-23 14:09"
-        if p.datetime == "unknown":
-            return "0000-00-00 00:00"
-        s = p.datetime.replace(".", "-")
-        return s
+    # datetime の新しい順に並べたいならここでソート（文字列でもだいたい効く）
+    def sort_key(x: PostIndex):
+        return x.datetime
 
-    index.sort(key=sort_key, reverse=True)
+    index_sorted = sorted(index, key=sort_key, reverse=True)
 
-    existing_index_path.write_text(
-        json.dumps([asdict(x) for x in index], ensure_ascii=False, indent=2),
+    (INDEX_DIR / "posts.json").write_text(
+        json.dumps([asdict(x) for x in index_sorted], ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
-    print(f"[DONE] added={added} total={len(index)}")
-    print(f"[DONE] wrote: {existing_index_path}")
+    print(f"[DONE] added={added} total={len(index_sorted)}")
+    print(f"[DONE] wrote: {INDEX_DIR / 'posts.json'}")
 
 
 if __name__ == "__main__":
