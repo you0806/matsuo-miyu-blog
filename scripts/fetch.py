@@ -18,11 +18,10 @@ CD = "MEMBER"
 IMA = "1200"  # あると挙動が安定しやすい（無いと別HTMLになることがある）
 
 # ===== 出力先：GitHub Pages のルートが docs 前提 =====
-REPO_ROOT = Path(__file__).resolve().parents[1]
-DOCS_DIR = REPO_ROOT / "docs"
-POSTS_DIR = DOCS_DIR / "posts"
-INDEX_DIR = DOCS_DIR / "index"
-DEBUG_DIR = DOCS_DIR / "_debug"
+OUT_DIR = Path(__file__).resolve().parents[1]
+SITE_DIR = OUT_DIR / "docs"          # ← Pages の公開ルート
+POSTS_DIR = SITE_DIR / "posts"       # ← docs/posts
+INDEX_DIR = SITE_DIR / "index"       # ← docs/index
 
 SLEEP_SEC = 1.0
 IMG_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".gif")
